@@ -172,11 +172,11 @@
 
 
 #ifndef NXP_ISO_XCHG_TIMEOUT
-#define NXP_ISO_XCHG_TIMEOUT            0x1AU
+#define NXP_ISO_XCHG_TIMEOUT            0x1BU
 #endif
 
 #ifndef NXP_MIFARE_XCHG_TIMEOUT
-#define NXP_MIFARE_XCHG_TIMEOUT         0x03U
+#define NXP_MIFARE_XCHG_TIMEOUT         0x0BU
 #endif
 
 #ifndef NXP_FELICA_XCHG_TIMEOUT
@@ -223,13 +223,19 @@
 #define LINK_CONNECTION_TIMEOUT         1000U
 #endif 
 
+/**< Defines ACK time out value for LLC timer,
+    150 is in milliseconds */
+#ifndef LINK_ACK_TIMEOUT
+#define LINK_ACK_TIMEOUT                1U
+#endif
+
 
 /**< Defines Firmware Download Completion Timeout value ,
     120000 is in milliseconds */
 
 
 #ifndef NXP_DNLD_COMPLETE_TIMEOUT
-#define NXP_DNLD_COMPLETE_TIMEOUT         120000U
+#define NXP_DNLD_COMPLETE_TIMEOUT         60000U
 #endif
 
 
@@ -254,7 +260,7 @@
 
 
 #ifndef NXP_NFC_HCI_TIMER
-#define NXP_NFC_HCI_TIMER       0
+#define NXP_NFC_HCI_TIMER       1
 #define NXP_NFC_HCI_TIMEOUT     6000
 #endif
 
@@ -369,11 +375,15 @@
 /**< Macro to Enable the Card Emulation Feature */
 /* #define HOST_EMULATION */
 
+#define NXP_HAL_VERIFY_EEPROM_CRC  0x01U
+
 /**< Macro to Enable the Download Mode Feature */
 #define FW_DOWNLOAD
 
 /**< Macro to Enable the Firmware Download Timer */
-#define FW_DOWNLOAD_TIMER
+/* 0x01U to use overall timeout */
+/* 0x02U to use per frame timeout */
+#define FW_DOWNLOAD_TIMER   0x02U
 
 /**< Macro to Verify the Firmware Download */
 /* #define FW_DOWNLOAD_VERIFY */
@@ -381,6 +391,9 @@
 #ifndef FW_DOWNLOAD_VERIFY
 #define NXP_FW_INTEGRITY_CHK    1
 #endif
+
+/* To specify the Maximum TX/RX Len */
+#define NXP_FW_MAX_TX_RX_LEN   0x200
 
 #define UICC_CONNECTIVITY_PATCH
 
@@ -505,6 +518,7 @@
  * speed during Discovery configuration
  */
 #define INITIATOR_SPEED
+#define TARGET_SPEED
 
 
 /**/

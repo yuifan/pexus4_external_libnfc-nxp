@@ -196,24 +196,11 @@ static NFCSTATUS phFriNfc_Llcp_InternalDeactivate( phFriNfc_Llcp_t *Llcp )
 static NFCSTATUS phFriNfc_Llcp_SendSymm( phFriNfc_Llcp_t *Llcp )
 {
    phFriNfc_Llcp_sPacketHeader_t sHeader;
-   bool_t                        bPendingFlag;
 
-   /* Check for pending messages to send */
-   bPendingFlag = phFriNfc_Llcp_HandlePendingSend(Llcp);
-
-   if (bPendingFlag == FALSE)
-   {
-      /* No send pending, send a SYMM instead */
-      sHeader.dsap  = PHFRINFC_LLCP_SAP_LINK;
-      sHeader.ssap  = PHFRINFC_LLCP_SAP_LINK;
-      sHeader.ptype = PHFRINFC_LLCP_PTYPE_SYMM;
-      return phFriNfc_Llcp_InternalSend(Llcp, &sHeader, NULL, NULL);
-   }
-   else
-   {
-      /* A pending send has been sent, there is no need to send SYMM */
-      return NFCSTATUS_SUCCESS;
-   }
+   sHeader.dsap  = PHFRINFC_LLCP_SAP_LINK;
+   sHeader.ssap  = PHFRINFC_LLCP_SAP_LINK;
+   sHeader.ptype = PHFRINFC_LLCP_PTYPE_SYMM;
+   return phFriNfc_Llcp_InternalSend(Llcp, &sHeader, NULL, NULL);
 }
 
 
@@ -423,7 +410,7 @@ static NFCSTATUS phFriNfc_Llcp_ParseLinkParams( phNfc_sData_t                   
                break;
             }
             /* Get MIU */
-            sParams.miu = PHFRINFC_LLCP_MIU_DEFAULT + ((sValueBuffer.buffer[0] << 8) | sValueBuffer.buffer[1]) & PHFRINFC_LLCP_TLV_MIUX_MASK;
+            sParams.miu = (PHFRINFC_LLCP_MIU_DEFAULT + ((sValueBuffer.buffer[0] << 8) | sValueBuffer.buffer[1])) & PHFRINFC_LLCP_TLV_MIUX_MASK;
             break;
          }
          case PHFRINFC_LLCP_TLV_TYPE_WKS:
@@ -640,7 +627,7 @@ static void phFriNfc_Llcp_HandleMACLinkDeactivated( phFriNfc_Llcp_t  *Llcp )
    }
 
    /* Reset state */
-   Llcp->state = PHFRINFC_LLCP_STATE_CHECKED;
+   Llcp->state = PHFRINFC_LLCP_STATE_RESET_INIT;
 
    switch (state)
    {
@@ -675,7 +662,7 @@ static void phFriNfc_Llcp_ChkLlcp_CB( void       *pContext,
 static void phFriNfc_Llcp_LinkStatus_CB( void                              *pContext,
                                          phFriNfc_LlcpMac_eLinkStatus_t    eLinkStatus,
                                          phNfc_sData_t                     *psParamsTLV,
-                                         phFriNfc_LlcpMac_eType_t          PeerRemoteDevType)
+                                         phFriNfc_LlcpMac_ePeerType_t      PeerRemoteDevType)
 {
    NFCSTATUS status;
 
@@ -730,7 +717,8 @@ static void phFriNfc_Llcp_ResetLTO( phFriNfc_Llcp_t *Llcp )
    {
       Llcp->state = PHFRINFC_LLCP_STATE_OPERATION_RECV;
    }
-   else
+   else if (Llcp->state != PHFRINFC_LLCP_STATE_DEACTIVATION &&
+            Llcp->state != PHFRINFC_LLCP_STATE_RESET_INIT)
    {
       /* Not yet in OPERATION state, perform first reset */
       if (Llcp->eRole == phFriNfc_LlcpMac_ePeerTypeInitiator)
@@ -758,6 +746,8 @@ static void phFriNfc_Llcp_ResetLTO( phFriNfc_Llcp_t *Llcp )
       /* TODO: make sure time scope is enough, and avoid use of magic number */
       nDuration = (Llcp->sLocalParams.lto * 10) / 2;
    }
+
+   LLCP_DEBUG("Starting LLCP timer with duration %d", nDuration);
 
    /* Restart timer */
    phOsalNfc_Timer_Start(
@@ -914,6 +904,11 @@ static bool_t phFriNfc_Llcp_HandlePendingSend ( phFriNfc_Llcp_t *Llcp )
          /* Error: send failed, impossible to recover */
          phFriNfc_Llcp_InternalDeactivate(Llcp);
       }
+      return_value = TRUE;
+   } else if (Llcp->pfSendCB == NULL) {
+      // Nothing to send, send SYMM instead to allow peer to send something
+      // if it wants.
+      phFriNfc_Llcp_SendSymm(Llcp);
       return_value = TRUE;
    }
 
@@ -1440,6 +1435,10 @@ NFCSTATUS phFriNfc_Llcp_Send( phFriNfc_Llcp_t                  *Llcp,
    {
       /* Incorrect state for sending ! */
       result = PHNFCSTVAL(CID_FRI_NFC_LLCP, NFCSTATUS_INVALID_STATE);;
+   }
+
+   if (result != NFCSTATUS_PENDING) {
+       Llcp->pfSendCB = NULL;
    }
    return result;
 }

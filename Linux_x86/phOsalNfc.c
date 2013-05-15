@@ -47,6 +47,8 @@ phOsalNfc_Exception_t phOsalNfc_Exception;
 char phOsalNfc_DbgTraceBuffer[MAX_PRINT_BUFSIZE];
 #endif
 
+void phLibNfc_Mgt_Recovery();
+
 /*!
  * \brief Allocates memory.
  *        This function attempts to allocate \a size bytes on the heap and
@@ -81,7 +83,7 @@ void phOsalNfc_DbgString(const char *pString)
 #ifndef ANDROID
       printf(pString);
 #else
-      LOGD("%s", pString);
+      ALOGD("%s", pString);
 #endif
 #endif
 }
@@ -111,15 +113,15 @@ void phOsalNfc_DbgTrace(uint8_t data[], uint32_t size)
    {
       if((i % 10) == 0)
       {
-         LOGD("%s", phOsalNfc_DbgTraceBuffer);
+         ALOGD("%s", phOsalNfc_DbgTraceBuffer);
          phOsalNfc_DbgTraceBuffer[0] = '\0';
       }
 
       snprintf(buf, 10, "%02X ", data[i]);
       strncat(phOsalNfc_DbgTraceBuffer, buf, 10);
    }
-   LOGD("%s", phOsalNfc_DbgTraceBuffer);
-   LOGD("Block size is: %d", size);
+   ALOGD("%s", phOsalNfc_DbgTraceBuffer);
+   ALOGD("Block size is: %d", size);
 #endif
 #endif
 }
@@ -140,13 +142,13 @@ void phOsalNfc_DbgTrace(uint8_t data[], uint32_t size)
  */
 void phOsalNfc_RaiseException(phOsalNfc_ExceptionType_t eExceptionType, uint16_t reason)
 {
-    LOGD("phOsalNfc_RaiseException() called");
-
     if(eExceptionType == phOsalNfc_e_UnrecovFirmwareErr)
     {
-        LOGE("HCI Timeout - Exception raised");
-        LOGE("Force restart of NFC Service");
+        ALOGE("HCI Timeout - Exception raised - Force restart of NFC service");
+        phLibNfc_Mgt_Recovery();
         abort();
+    } else {
+        ALOGD("phOsalNfc_RaiseException() called");
     }
 }
 
@@ -158,18 +160,55 @@ void phOsalNfc_RaiseException(phOsalNfc_ExceptionType_t eExceptionType, uint16_t
  * \param[in] pBuffer pointer to data bytes to be displayed.
  *
  */
-void phOsalNfc_PrintData(const char *pString, uint32_t length, uint8_t *pBuffer)
+void phOsalNfc_PrintData(const char *pString, uint32_t length, uint8_t *pBuffer,
+        int verbosity)
 {
-    char print_buffer[512]; // Max length 512 for the download mode
-    int i;
+    char print_buffer[length * 3 + 1];
+    unsigned int i;
 
-    if(NULL!=pString && length > 1 && length < 34)
-    {
-        print_buffer[0] = '\0';
-        for (i = 0; i < length; i++) {
-            snprintf(&print_buffer[i*5], 6, " 0x%02X", pBuffer[i]);
-        }
-        LOGD("> NFC I2C %s: %s", pString,print_buffer);
+    if (pString == NULL) {
+        pString = "";
     }
-}
+    print_buffer[0] = '\0';
+    for (i = 0; i < length; i++) {
+        snprintf(&print_buffer[i*3], 4, " %02X", pBuffer[i]);
+    }
 
+    char llc[40] = "";
+
+    if (verbosity >= 2) {
+        uint8_t llc_header = 0;
+        if (!strcmp(pString, "SEND") && length >= 2) {
+            llc_header = pBuffer[1];
+        } else if (!strcmp(pString, "RECV") && length >= 2) {
+            llc_header = pBuffer[0];
+        }
+
+        if ((llc_header & 0xC0) == 0x80) {
+            // I
+            uint8_t ns = (llc_header & 0x38) >> 3;
+            uint8_t nr = llc_header & 0x07;
+            snprintf(&llc[0], sizeof(llc), "I %d (%d)", ns, nr);
+        } else if ((llc_header & 0xE0) == 0xC0) {
+            // S
+            uint8_t t = (llc_header & 0x18) >> 3;
+            uint8_t nr = llc_header & 0x07;
+            char *type;
+            switch (t) {
+            case 0x00: type = "RR "; break;
+            case 0x01: type = "REJ"; break;
+            case 0x02: type = "RNR"; break;
+            case 0x03: type = "SREJ"; break;
+            default: type = "???"; break;
+            }
+            snprintf(&llc[0], sizeof(llc), "S %s (%d)", type, nr);
+        } else if ((llc_header & 0xE0) == 0xE0) {
+            // U
+            snprintf(&llc[0], sizeof(llc), "U");
+        } else if (length > 1) {
+            snprintf(&llc[0], sizeof(llc), "???");
+        }
+    }
+
+    ALOGD("> %s:%s\t%s", pString, print_buffer, llc);
+}

@@ -31,6 +31,8 @@
 ************************* Header Files ****************************************
 */
 
+#define LOG_TAG "NFC"
+
 #include <phLibNfc.h>
 #include <phDal4Nfc.h>
 #include <phHal4Nfc.h>
@@ -44,6 +46,8 @@
 /*
 *************************** Macro's  ******************************************
 */
+
+extern int dlopen_firmware();
 
 #ifndef STATIC_DISABLE
 #define STATIC static
@@ -106,6 +110,7 @@ NFCSTATUS phLibNfc_HW_Reset ()
 {
     NFCSTATUS Status = NFCSTATUS_SUCCESS;
 
+    Status = phDal4Nfc_Reset(1);
     Status = phDal4Nfc_Reset(0);
     Status = phDal4Nfc_Reset(1);
 
@@ -117,6 +122,25 @@ NFCSTATUS phLibNfc_Download_Mode ()
    return phDal4Nfc_Download();
 }
 
+int phLibNfc_Load_Firmware_Image ()
+{
+    int status;
+    status = dlopen_firmware();
+    return status;
+}
+
+// Function for delay the recovery in case wired mode is set
+// to complete the possible pending transaction with SE
+void phLibNfc_Mgt_Recovery ()
+{
+    /* Wait before recovery if wired mode */
+    if (gpphLibContext->sSeContext.eActivatedMode == phLibNfc_SE_ActModeWired)
+    {
+        usleep (12000000);
+    }
+
+    return;
+}
 
 extern uint8_t nxp_nfc_isoxchg_timeout;
 NFCSTATUS phLibNfc_SetIsoXchgTimeout(uint8_t timeout) {
@@ -124,10 +148,38 @@ NFCSTATUS phLibNfc_SetIsoXchgTimeout(uint8_t timeout) {
     return NFCSTATUS_SUCCESS;
 }
 
+int phLibNfc_GetIsoXchgTimeout() {
+    return nxp_nfc_isoxchg_timeout;
+}
+
 extern uint32_t nxp_nfc_hci_response_timeout;
 NFCSTATUS phLibNfc_SetHciTimeout(uint32_t timeout_in_ms) {
     nxp_nfc_hci_response_timeout = timeout_in_ms;
     return NFCSTATUS_SUCCESS;
+}
+
+int phLibNfc_GetHciTimeout() {
+    return nxp_nfc_hci_response_timeout;
+}
+
+extern uint8_t nxp_nfc_felica_timeout;
+NFCSTATUS phLibNfc_SetFelicaTimeout(uint8_t timeout_in_ms) {
+    nxp_nfc_felica_timeout = timeout_in_ms;
+    return NFCSTATUS_SUCCESS;
+}
+
+int phLibNfc_GetFelicaTimeout() {
+    return nxp_nfc_felica_timeout;
+}
+
+extern uint8_t nxp_nfc_mifareraw_timeout;
+NFCSTATUS phLibNfc_SetMifareRawTimeout(uint8_t timeout) {
+    nxp_nfc_mifareraw_timeout = timeout;
+    return NFCSTATUS_SUCCESS;
+}
+
+int phLibNfc_GetMifareRawTimeout() {
+    return nxp_nfc_mifareraw_timeout;
 }
 
 /**
@@ -580,6 +632,7 @@ NFCSTATUS phLibNfc_Mgt_Reset(void  *pContext)
         }
         /* No device is connected */
         gpphLibContext->Connected_handle = 0x00;       
+        gpphLibContext->Prev_Connected_handle = 0x00;
         gpphLibContext->ReleaseType = NFC_INVALID_RELEASE_TYPE;        
         gpphLibContext->eLibNfcCfgMode = NFC_DISCOVERY_STOP;
         /*Lib Nfc Stack is initilized and in idle state*/
@@ -826,10 +879,15 @@ NFCSTATUS phLibNfc_Mgt_GetstackCapabilities(
             gpphLibContext->psHwReference->device_info.model_id;        
         (void)memcpy(phLibNfc_StackCapabilities->psDevCapabilities.full_version,
             gpphLibContext->psHwReference->device_info.full_version,NXP_FULL_VERSION_LEN);
-        
         /* Check the firmware version */
-        phLibNfc_StackCapabilities->psDevCapabilities.firmware_update_info = memcmp(phLibNfc_StackCapabilities->psDevCapabilities.full_version, nxp_nfc_full_version,
-                   NXP_FULL_VERSION_LEN);
+        if (nxp_nfc_full_version == NULL) {
+            // Couldn't load firmware, just pretend we're up to date.
+            ALOGW("Firmware image not available: this device might be running old NFC firmware!");
+            phLibNfc_StackCapabilities->psDevCapabilities.firmware_update_info = 0;
+        } else {
+            phLibNfc_StackCapabilities->psDevCapabilities.firmware_update_info = memcmp(phLibNfc_StackCapabilities->psDevCapabilities.full_version, nxp_nfc_full_version,
+                       NXP_FULL_VERSION_LEN);
+        }
 
         if(NFCSTATUS_SUCCESS != RetVal)
         {       

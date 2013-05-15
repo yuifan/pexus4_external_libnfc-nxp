@@ -135,7 +135,7 @@ STATIC void phLibNfc_SeNotification(void  *context,
 {
     pphLibNfc_LibContext_t pLibContext=(pphLibNfc_LibContext_t)context;
     phHal_sEventInfo_t  *pEvtInfo = NULL;     
-    phLibNfc_uSeEvtInfo_t Se_Trans_Info={0};
+    phLibNfc_uSeEvtInfo_t Se_Trans_Info={{{0,0},{0,0}}};
     phLibNfc_SE_List_t  *pSeInfo=NULL;  
     
     if(pLibContext != gpphLibContext)
@@ -204,6 +204,51 @@ STATIC void phLibNfc_SeNotification(void  *context,
                             status);
                         break;
                     }
+
+                    case NFC_EVT_APDU_RECEIVED:
+                    {
+                        if ((pEvtInfo->eventInfo.aid.length != 0) && ((pEvtInfo->eventInfo.aid.length <= 16)))
+                        {
+                            /* Copy received APDU to aid buffer. */
+                            Se_Trans_Info.UiccEvtInfo.aid.buffer = pEvtInfo->eventInfo.aid.buffer;
+                            Se_Trans_Info.UiccEvtInfo.aid.length = pEvtInfo->eventInfo.aid.length;
+                        }
+
+                        (*pLibContext->sSeContext.sSeCallabackInfo.pSeListenerNtfCb)(
+                            pLibContext->sSeContext.sSeCallabackInfo.pSeListenerCtxt,
+                            phLibNfc_eSE_EvtApduReceived,
+                            pSeInfo->hSecureElement,
+                            &Se_Trans_Info,
+                            status);
+                        break;
+                    }
+
+                    case NFC_EVT_MIFARE_ACCESS:
+                    {
+                        /* copy the Block MIFARE accessed */
+                        Se_Trans_Info.UiccEvtInfo.aid.buffer = pEvtInfo->eventInfo.aid.buffer;
+                        Se_Trans_Info.UiccEvtInfo.aid.length = pEvtInfo->eventInfo.aid.length;
+
+                        (*pLibContext->sSeContext.sSeCallabackInfo.pSeListenerNtfCb)(
+                            pLibContext->sSeContext.sSeCallabackInfo.pSeListenerCtxt,
+                            phLibNfc_eSE_EvtMifareAccess,
+                            pSeInfo->hSecureElement,
+                            &Se_Trans_Info,
+                            status);
+                        break;
+                    }
+
+                    case NFC_EVT_EMV_CARD_REMOVAL:
+                    {
+                        (*pLibContext->sSeContext.sSeCallabackInfo.pSeListenerNtfCb)(
+                            pLibContext->sSeContext.sSeCallabackInfo.pSeListenerCtxt,
+                            phLibNfc_eSE_EvtCardRemoval,
+                            pSeInfo->hSecureElement,
+                            &Se_Trans_Info,
+                            status);
+                        break;
+                    }
+
                     case NFC_EVT_END_OF_TRANSACTION:
                     {
                         (*pLibContext->sSeContext.sSeCallabackInfo.pSeListenerNtfCb)(
@@ -428,7 +473,6 @@ NFCSTATUS phLibNfc_SE_SetMode ( phLibNfc_Handle             hSE_Handle,
         switch(eActivation_mode)
         {
             case phLibNfc_SE_ActModeVirtual: 
-            case phLibNfc_SE_ActModeDefault:
             {
                 if(hSE_Handle == sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].hSecureElement)
                 {
@@ -462,6 +506,69 @@ NFCSTATUS phLibNfc_SE_SetMode ( phLibNfc_Handle             hSE_Handle,
                 }
             }
             break;
+            case phLibNfc_SE_ActModeVirtualVolatile:
+            {
+                if(hSE_Handle == sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].hSecureElement)
+                {
+                    eEmulationType = NFC_SMARTMX_EMULATION;
+                    /*Enable the SMX -External reader can see it*/
+                    pLibContext->sCardEmulCfg.config.smartMxCfg.enableEmulation = TRUE;
+                    pLibContext->sSeContext.eActivatedMode = phLibNfc_SE_ActModeVirtualVolatile;
+
+                    Status = phHal4Nfc_Switch_SMX_Mode(
+                                        pLibContext->psHwReference,
+                                        eSmartMx_Virtual,
+                                        phLibNfc_SE_SetMode_cb,
+                                        pLibContext
+                                        );
+                }
+                else if(hSE_Handle == sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].hSecureElement)
+                {
+                    eEmulationType = NFC_UICC_EMULATION;
+                    /*Enable the UICC -External reader can see it*/
+                    pLibContext->sCardEmulCfg.config.uiccEmuCfg.enableUicc = TRUE;
+                    pLibContext->sSeContext.eActivatedMode = phLibNfc_SE_ActModeVirtualVolatile;
+
+                    Status = phHal4Nfc_Switch_Swp_Mode(
+                                        pLibContext->psHwReference,
+                                        eSWP_Switch_On,
+                                        phLibNfc_SE_SetMode_cb,
+                                        pLibContext
+                                        );
+                }
+                else
+                {
+                    Status = NFCSTATUS_INVALID_HANDLE;
+                }
+            }
+            break;
+            case phLibNfc_SE_ActModeDefault:
+            {
+                if(hSE_Handle == sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].hSecureElement)
+                {
+                    Status = phHal4Nfc_Switch_SMX_Mode(
+                                        pLibContext->psHwReference,
+                                        eSmartMx_Default,
+                                        phLibNfc_SE_SetMode_cb,
+                                        pLibContext
+                                        );
+                }
+                else if(hSE_Handle == sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].hSecureElement)
+                {
+                    Status = phHal4Nfc_Switch_Swp_Mode(
+                                        pLibContext->psHwReference,
+                                        eSWP_Switch_Default,
+                                        phLibNfc_SE_SetMode_cb,
+                                        pLibContext
+                                        );
+                }
+                else
+                {
+                    Status = NFCSTATUS_INVALID_HANDLE;
+                }
+            }
+            break;
+
             case phLibNfc_SE_ActModeWired:
             {
                 if(hSE_Handle == sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].hSecureElement)
@@ -558,81 +665,80 @@ NFCSTATUS phLibNfc_SE_SetMode ( phLibNfc_Handle             hSE_Handle,
 */
 STATIC void phLibNfc_SE_SetMode_cb(void  *context, NFCSTATUS status)
 {
-    pphLibNfc_LibContext_t pLibContext=(pphLibNfc_LibContext_t)context;
+    /* Note that we don't use the passed in context here;
+     * the reason is that there are race-conditions around
+     * the place where this context is stored (mostly in combination
+     * with LLCP), and we may actually get the wrong context.
+     * Since this callback always uses the global context
+     * we don't need the passed in context anyway.
+     */
+    pphLibNfc_LibContext_t pLibContext=gpphLibContext;
     pphLibNfc_SE_SetModeRspCb_t  pUpperLayerCb=NULL;
     void                         *pUpperContext=NULL;
     phLibNfc_Handle              hSeHandle=0;
     uint8_t                      TempState=FALSE;  
 
-    if(pLibContext != gpphLibContext)
+    if(eLibNfcHalStateShutdown == gpphLibContext->LibNfcState.next_state)
     {
-        /*wrong context returned*/
-        phOsalNfc_RaiseException(phOsalNfc_e_InternalErr,1);
+        /*If shutdown is called in between allow shutdown to happen*/
+        phLibNfc_Pending_Shutdown();
+        status = NFCSTATUS_SHUTDOWN;
     }
     else
     {
-        if(eLibNfcHalStateShutdown == gpphLibContext->LibNfcState.next_state)
+        if(status == NFCSTATUS_SUCCESS)
         {
-            /*If shutdown is called in between allow shutdown to happen*/
-            phLibNfc_Pending_Shutdown();
-            status = NFCSTATUS_SHUTDOWN;
-        }
-        else
-        {
-            if(status == NFCSTATUS_SUCCESS)
-            {
-                hSeHandle = pLibContext->sSeContext.hSetemp;       
+            hSeHandle = pLibContext->sSeContext.hSetemp;
 
-                if(hSeHandle == sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].hSecureElement)
+            if(hSeHandle == sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].hSecureElement)
+            {
+                if(TRUE==pLibContext->sCardEmulCfg.config.uiccEmuCfg.enableUicc)
                 {
-                    if(TRUE==pLibContext->sCardEmulCfg.config.uiccEmuCfg.enableUicc)
-                    {
-                        /*If  Activation mode was virtual allow external reader to see it*/
-                        pLibContext->sSeContext.uUiccActivate = TRUE;
-                        sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].eSE_CurrentState = phLibNfc_SE_Active;
-                    }
-                    else
-                    {
-                        /*If  Activation mode was wired don't allow external reader to see it*/
-                        pLibContext->sSeContext.uUiccActivate = FALSE;
-                        sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].eSE_CurrentState =
-                                                                    phLibNfc_SE_Inactive;
-                    }
-                    status = NFCSTATUS_SUCCESS;                    
-                    TempState = pLibContext->sSeContext.uUiccActivate;
-                }
-                else if (hSeHandle==sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].hSecureElement)
-                {
-                    if(TRUE==pLibContext->sCardEmulCfg.config.smartMxCfg.enableEmulation)
-                    {
-                        /*If  Activation mode was virtual allow external reader to see it*/
-                        pLibContext->sSeContext.uSmxActivate = TRUE;
-                        sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].eSE_CurrentState = 
-                                                                        phLibNfc_SE_Active; 
-                    }
-                    else
-                    {
-                        /*If  Activation mode was wired don't allow external reader to see it*/
-                        pLibContext->sSeContext.uSmxActivate = FALSE;                        
-                        sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].eSE_CurrentState=
-                                                                        phLibNfc_SE_Inactive; 
-                    }
-                    status = NFCSTATUS_SUCCESS;                    
-                    TempState = pLibContext->sSeContext.uSmxActivate;
+                    /*If  Activation mode was virtual allow external reader to see it*/
+                    pLibContext->sSeContext.uUiccActivate = TRUE;
+                    sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].eSE_CurrentState = phLibNfc_SE_Active;
                 }
                 else
                 {
-                    status = NFCSTATUS_FAILED;
+                    /*If  Activation mode was wired don't allow external reader to see it*/
+                    pLibContext->sSeContext.uUiccActivate = FALSE;
+                    sSecuredElementInfo[LIBNFC_SE_UICC_INDEX].eSE_CurrentState =
+                                                                phLibNfc_SE_Inactive;
                 }
+                status = NFCSTATUS_SUCCESS;
+                TempState = pLibContext->sSeContext.uUiccActivate;
+            }
+            else if (hSeHandle==sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].hSecureElement)
+            {
+                if(TRUE==pLibContext->sCardEmulCfg.config.smartMxCfg.enableEmulation)
+                {
+                    /*If  Activation mode was virtual allow external reader to see it*/
+                    pLibContext->sSeContext.uSmxActivate = TRUE;
+                    sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].eSE_CurrentState =
+                                                                    phLibNfc_SE_Active;
+                }
+                else
+                {
+                    /*If  Activation mode was wired don't allow external reader to see it*/
+                    pLibContext->sSeContext.uSmxActivate = FALSE;
+                    sSecuredElementInfo[LIBNFC_SE_SMARTMX_INDEX].eSE_CurrentState=
+                                                                    phLibNfc_SE_Inactive;
+                }
+                status = NFCSTATUS_SUCCESS;
+                TempState = pLibContext->sSeContext.uSmxActivate;
             }
             else
             {
                 status = NFCSTATUS_FAILED;
             }
-            pLibContext->status.GenCb_pending_status = FALSE; 
         }
-        
+        else
+        {
+            status = NFCSTATUS_FAILED;
+        }
+        pLibContext->status.GenCb_pending_status = FALSE;
     }
+
     pUpperLayerCb = pLibContext->sSeContext.sSeCallabackInfo.pSEsetModeCb;
     pUpperContext = pLibContext->sSeContext.sSeCallabackInfo.pSEsetModeCtxt;  
     pLibContext->sSeContext.sSeCallabackInfo.pSEsetModeCb = NULL;

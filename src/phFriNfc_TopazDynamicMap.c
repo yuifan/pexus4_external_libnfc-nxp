@@ -199,6 +199,9 @@ so there are 4 segements in the card */
     ((((block_no) + 1) == TOPAZ_STATIC_LOCK_FIRST_BLOCK_NO) ? \
     (((block_no) + 1) + TOPAZ_STATIC_LOCK_BLOCK_AREAS) : \
     ((block_no) + 1))
+/* Check topaz spec version number */
+#define TOPAZ_COMPARE_VERSION(device_ver, tag_ver) \
+    ((device_ver & 0xF0) >= (tag_ver & 0xF0))
 
 #ifdef FRINFC_READONLY_NDEF
 
@@ -1010,7 +1013,7 @@ phFriNfc_Tpz_H_UpdateAndWriteLockBits (
                 lock_byte_index = (uint8_t)(lock_byte_index + 1);
                 byte_index = (uint8_t)(byte_index + 1);
             }
-        } /* else of /* if (mod_value) */
+        } /* else of if (mod_value) */
         ps_tpz_info->lock_bytes_written = remaining_lock_bits;
     }
     else /* if (no_of_bits_left_in_block >= remaining_lock_bits) */
@@ -2368,7 +2371,7 @@ phFriNfc_Tpz_H_CheckCCBytesForWrite (
     {
         check_index = (uint8_t)(check_index + 1);
 
-        if ((check_cc_rw[0] != ps_tpz_info->CCByteBuf[1]) || 
+        if ((!TOPAZ_COMPARE_VERSION(check_cc_rw[0], ps_tpz_info->CCByteBuf[1])) ||
             (check_cc_rw[1] != ps_tpz_info->CCByteBuf[2]) || 
             (check_cc_rw[2] != ps_tpz_info->CCByteBuf[3]))
         {
@@ -3848,7 +3851,7 @@ phFriNfc_Tpz_H_CopySendWrData (
 #endif /* #ifdef TOPAZ_RAW_SUPPORT */
         psNdefMap->State = (uint8_t)PH_FRINFC_TOPAZ_STATE_WRITE;
 
-        if ((write_len - psNdefMap->ApduBuffIndex) >= TOPAZ_WRITE_8_DATA_LENGTH)
+        if ((write_len - psNdefMap->ApduBuffIndex) >= (uint16_t)TOPAZ_WRITE_8_DATA_LENGTH)
         {
             copy_length = (uint8_t)TOPAZ_WRITE_8_DATA_LENGTH;
             (void)memcpy ((void *)write_buf, 

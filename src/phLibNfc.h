@@ -129,7 +129,10 @@ typedef enum
                                         This can be applied to UICC as well as SmartMX*/
     phLibNfc_SE_ActModeVirtual=0x02,    /**< Enables Virtual Mode communication.
                                         This can be applied to UICC as well as SmartMX*/
-    phLibNfc_SE_ActModeOff  =0x03       /**< Inactivate SE.This means,put SE in in-active state */
+    phLibNfc_SE_ActModeOff  =0x03,      /**< Inactivate SE.This means,put SE in in-active state
+                                        This can be applied to UICC as well as SmartMX*/
+    phLibNfc_SE_ActModeVirtualVolatile = 0x04 /**< Enabled virtual mode communication for SE through an event
+                                             This can be applied to UICC as well as SmartMX*/
 
 }phLibNfc_eSE_ActivationMode;
 
@@ -173,6 +176,12 @@ typedef enum
                                            ETSI TS 102 622 V7.4.0 */
     phLibNfc_eSE_EvtFieldOn,  // consider using phLibNfc_eSE_EvtConnectivity
     phLibNfc_eSE_EvtFieldOff,
+
+    phLibNfc_eSE_EvtApduReceived, /* PAYPASS MagStripe or MCHIP_4 transaction */
+
+    phLibNfc_eSE_EvtCardRemoval, /* Indicates the beginning of an EMV Card Removal sequence */
+
+    phLibNfc_eSE_EvtMifareAccess /* Indicates when the SMX Emulation MIFARE is accessed */
 } phLibNfc_eSE_EvtType_t;
 
 /**
@@ -845,6 +854,12 @@ NFCSTATUS phLibNfc_HW_Reset ();
 
 NFCSTATUS phLibNfc_Download_Mode ();
 
+int phLibNfc_Load_Firmware_Image ();
+
+// Function for delay the recovery in case wired mode is set
+// to complete the possible pending transaction with SE
+void phLibNfc_Mgt_Recovery ();
+
 // timeout is 8 bits
 // bits [0..3] => timeout value, (256*16/13.56*10^6) * 2^value
 //                  [0] -> 0.0003s
@@ -854,7 +869,27 @@ NFCSTATUS phLibNfc_Download_Mode ();
 // bit [4]     => timeout enable
 // bit [5..7]  => unused
 NFCSTATUS phLibNfc_SetIsoXchgTimeout(uint8_t timeout);
+int phLibNfc_GetIsoXchgTimeout();
+
 NFCSTATUS phLibNfc_SetHciTimeout(uint32_t timeout_in_ms);
+int phLibNfc_GetHciTimeout();
+
+// Felica timeout
+// [0]      -> timeout disabled
+// [1..255] -> timeout in ms
+NFCSTATUS phLibNfc_SetFelicaTimeout(uint8_t timeout_in_ms);
+int phLibNfc_GetFelicaTimeout();
+
+// MIFARE RAW timeout (ISO14443-3A / NfcA timeout)
+// timeout is 8 bits
+// bits [0..3] => timeout value, (256*16/13.56*10^6) * 2^value
+//                  [0] -> 0.0003s
+//                  ..
+//                  [14] -> 4.9s
+//                  [15] -> not allowed
+// bits [4..7] => 0
+NFCSTATUS phLibNfc_SetMifareRawTimeout(uint8_t timeout);
+int phLibNfc_GetMifareRawTimeout();
 
 /**
 * \ingroup grp_lib_nfc
@@ -1960,6 +1995,8 @@ NFCSTATUS phLibNfc_RemoteDev_FormatNdef(phLibNfc_Handle         hRemoteDevice,
 *\param[in] hRemoteDevice           handle of the remote device.This handle to be
 *                                   same as as handle obtained for specific remote device
 *                                   during device discovery.
+*\param[in] pScrtKey                Key to be used for making Mifare read only. This parameter is
+*                                   unused in case of readonly for other cards.
 *\param[in] pNdefReadOnly_RspCb     Response callback defined by the caller.
 *\param[in] pContext                Client context which will be included in
 *                                   callback when the request is completed.
@@ -2006,9 +2043,10 @@ NFCSTATUS phLibNfc_RemoteDev_FormatNdef(phLibNfc_Handle         hRemoteDevice,
 *                  \param NFCSTATUS_FAILED              Request failed.
 */
 
-NFCSTATUS phLibNfc_ConvertToReadOnlyNdef (phLibNfc_Handle       hRemoteDevice,
-                                        pphLibNfc_RspCb_t       pNdefReadOnly_RspCb,
-                                        void*                   pContext
+NFCSTATUS phLibNfc_ConvertToReadOnlyNdef (phLibNfc_Handle         hRemoteDevice,
+                                          phNfc_sData_t*          pScrtKey,
+                                          pphLibNfc_RspCb_t       pNdefReadOnly_RspCb,
+                                          void*                   pContext
                                         );
 #endif /* #ifdef LIBNFC_READONLY_NDEF */
 
@@ -2546,7 +2584,9 @@ extern NFCSTATUS phLibNfc_Llcp_GetRemoteInfo( phLibNfc_Handle                   
 * must provide a working buffer to the socket in order to handle incoming data. This buffer
 * must be large enough to fit the receive window (RW * MIU), the remaining space being
 * used as a linear buffer to store incoming data as a stream. Data will be readable later
-* using the phLibNfc_Llcp_Recv function.
+* using the phLibNfc_Llcp_Recv function. If the socket is connectionless, the caller may
+* provide a working buffer to the socket in order to bufferize as many packets as the buffer
+* can contain (each packet needs MIU + 1 bytes).
 * The options and working buffer are not required if the socket is used as a listening socket,
 * since it cannot be directly used for communication.
 *
@@ -2576,6 +2616,47 @@ extern NFCSTATUS phLibNfc_Llcp_Socket( phLibNfc_Llcp_eSocketType_t      eType,
                                        pphLibNfc_LlcpSocketErrCb_t      pErr_Cb,
                                        void*                            pContext
                                        );
+
+
+/**
+* \ingroup grp_lib_nfc
+* \brief <b>Get SAP of remote services using their names</b>.
+*
+* This function sends SDP queries to the remote peer to get the SAP to address for a given
+* service name. The queries are aggregated as much as possible for efficiency, but if all
+* the queries cannot fit in a single packet, they will be splitted in multiple packets.
+* The callback will be called only when all of the requested services names SAP will be
+* gathered. As mentionned in LLCP specification, a SAP of 0 means that the service name
+* as not been found.
+*
+* This feature is available only since LLCP v1.1, both devices must be at least v1.1 in
+* order to be able to use this function.
+*
+* \param[in]  hRemoteDevice      Peer handle obtained during device discovery process.
+* \param[in]  psServiceNameList  The list of the service names to discover.
+* \param[out] pnSapList          The list of the corresponding SAP numbers, in the same
+*                                order than the service names list.
+* \param[in]  nListSize          The size of both service names and SAP list.
+* \param[in]  pDiscover_Cb       The callback to be called once LibNfc matched SAP for
+*                                all of the provided service names.
+* \param[in]  pContext           Upper layer context to be returned in the callback.
+*
+* \retval NFCSTATUS_SUCCESS                  Operation successful.
+* \retval NFCSTATUS_INVALID_PARAMETER        One or more of the supplied parameters
+*                                            could not be properly interpreted.
+* \retval NFCSTATUS_NOT_INITIALISED          Indicates stack is not yet initialized.
+* \retval NFCSTATUS_SHUTDOWN                 Shutdown in progress.
+* \retval NFCSTATUS_FAILED                   Operation failed.
+* \retval NFCSTATUS_FEATURE_NOT_SUPPORTED    Remote peer does not support this feature (e.g.: is v1.0).
+* \retval NFCSTATUS_BUSY                     Previous request in progress can not accept new request.
+*/
+extern NFCSTATUS phLibNfc_Llcp_DiscoverServices( phLibNfc_Handle     hRemoteDevice,
+                                                 phNfc_sData_t       *psServiceNameList,
+                                                 uint8_t             *pnSapList,
+                                                 uint8_t             nListSize,
+                                                 pphLibNfc_RspCb_t   pDiscover_Cb,
+                                                 void                *pContext
+                                               );
 
 
 /**
@@ -2655,9 +2736,8 @@ extern NFCSTATUS phLibNfc_Llcp_SocketGetRemoteOptions( phLibNfc_Handle          
 * This function binds the socket to a local Service Access Point.
 *
 * \param[in]  hSocket               Peer handle obtained during device discovery process.
-* \param[out] pConfigInfo           Pointer on the variable to be filled with the configuration
-*                                   parameters used during activation.
-*
+* \param TODO (nSap + sn)
+
 * \retval NFCSTATUS_SUCCESS                  Operation successful.
 * \retval NFCSTATUS_INVALID_PARAMETER        One or more of the supplied parameters
 *                                            could not be properly interpreted.
@@ -2670,7 +2750,8 @@ extern NFCSTATUS phLibNfc_Llcp_SocketGetRemoteOptions( phLibNfc_Handle          
 * \retval NFCSTATUS_FAILED                   Operation failed.
 */
 extern NFCSTATUS phLibNfc_Llcp_Bind( phLibNfc_Handle hSocket,
-                                     uint8_t         nSap
+                                     uint8_t         nSap,
+                                     phNfc_sData_t * psServiceName
                                      );
 
 
@@ -2687,8 +2768,6 @@ extern NFCSTATUS phLibNfc_Llcp_Bind( phLibNfc_Handle hSocket,
 *
 *
 * \param[in]  hSocket            Socket handle obtained during socket creation.
-* \param[in]  psServiceName      A buffer containing the name of the service for SDP. No SDP
-*                                advertising if set to NULL.
 * \param[in]  pListen_Cb         The callback to be called each time the
 *                                socket receive a connection request.
 * \param[in]  pContext           Upper layer context to be returned in
@@ -2704,7 +2783,6 @@ extern NFCSTATUS phLibNfc_Llcp_Bind( phLibNfc_Handle hSocket,
 * \retval NFCSTATUS_FAILED                   Operation failed.
 */
 extern NFCSTATUS phLibNfc_Llcp_Listen( phLibNfc_Handle                  hSocket,
-                                       phNfc_sData_t                    *psServiceName,
                                        pphLibNfc_LlcpSocketListenCb_t   pListen_Cb,
                                        void*                            pContext
                                        );

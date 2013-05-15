@@ -26,11 +26,18 @@
  *
  */
 
+#define LOG_TAG "NFC_uart"
+#include <cutils/log.h>
+#include <hardware/nfc.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
+#include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <stdio.h>
+#include <errno.h>
 
 #include <phDal4Nfc_debug.h>
 #include <phDal4Nfc_uart.h>
@@ -38,6 +45,7 @@
 #include <phNfcStatus.h>
 #if defined(ANDROID)
 #include <string.h>
+#include <cutils/properties.h> // for property_get
 #endif
 
 typedef struct
@@ -151,48 +159,16 @@ PURPOSE:  Closes the link
 
 NFCSTATUS phDal4Nfc_uart_open_and_configure(pphDal4Nfc_sConfig_t pConfig, void ** pLinkHandle)
 {
-   char *       pComPort;
    int          nComStatus;
    NFCSTATUS    nfcret = NFCSTATUS_SUCCESS;
    int          ret;
 
    DAL_ASSERT_STR(gComPortContext.nOpened==0, "Trying to open but already done!");
 
-   switch(pConfig->nLinkType)
-   {
-     case ENUM_DAL_LINK_TYPE_COM1:
-      pComPort = "/dev/ttyS0";
-      break;
-     case ENUM_DAL_LINK_TYPE_COM2:
-      pComPort = "/dev/ttyS1";
-      break;
-     case ENUM_DAL_LINK_TYPE_COM3:
-      pComPort = "/dev/ttyS2";
-      break;
-     case ENUM_DAL_LINK_TYPE_COM4:
-      pComPort = "/dev/ttyS3";
-      break;
-     case ENUM_DAL_LINK_TYPE_COM5:
-      pComPort = "/dev/ttyS4";
-      break;
-     case ENUM_DAL_LINK_TYPE_COM6:
-      pComPort = "/dev/ttyS5";
-      break;
-     case ENUM_DAL_LINK_TYPE_COM7:
-      pComPort = "/dev/ttyS6";
-      break;
-     case ENUM_DAL_LINK_TYPE_COM8:
-      pComPort = "/dev/ttyS7";
-      break;
-     case ENUM_DAL_LINK_TYPE_USB:
-      pComPort = "/dev/ttyUSB0";
-      break;
-     default:
-      return NFCSTATUS_INVALID_PARAMETER;
-   }
+   srand(time(NULL));
 
    /* open communication port handle */
-   gComPortContext.nHandle = open(pComPort, O_RDWR | O_NOCTTY);
+   gComPortContext.nHandle = open(pConfig->deviceNode, O_RDWR | O_NOCTTY);
    if (gComPortContext.nHandle < 0)
    {
       *pLinkHandle = NULL;
@@ -254,6 +230,60 @@ NFCSTATUS phDal4Nfc_uart_open_and_configure(pphDal4Nfc_sConfig_t pConfig, void *
    return nfcret;
 }
 
+/*
+  adb shell setprop debug.nfc.UART_ERROR_RATE X
+  will corrupt and drop bytes in uart_read(), to test the error handling
+  of DAL & LLC errors.
+ */
+int property_error_rate = 0;
+static void read_property() {
+    char value[PROPERTY_VALUE_MAX];
+    property_get("debug.nfc.UART_ERROR_RATE", value, "0");
+    property_error_rate = atoi(value);
+}
+
+/* returns length of buffer after errors */
+static int apply_errors(uint8_t *buffer, int length) {
+    int i;
+    if (!property_error_rate) return length;
+
+    for (i = 0; i < length; i++) {
+        if (rand() % 1000 < property_error_rate) {
+            if (rand() % 2) {
+                // 50% chance of dropping byte
+                length--;
+                memcpy(&buffer[i], &buffer[i+1], length-i);
+                ALOGW("dropped byte %d", i);
+            } else {
+                // 50% chance of corruption
+                buffer[i] = (uint8_t)rand();
+                ALOGW("corrupted byte %d", i);
+            }
+        }
+    }
+    return length;
+}
+
+static struct timeval timeval_remaining(struct timespec timeout) {
+    struct timespec now;
+    struct timeval delta;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    delta.tv_sec = timeout.tv_sec - now.tv_sec;
+    delta.tv_usec = (timeout.tv_nsec - now.tv_nsec) / (long)1000;
+
+    if (delta.tv_usec < 0) {
+        delta.tv_usec += 1000000;
+        delta.tv_sec--;
+    }
+    if (delta.tv_sec < 0) {
+        delta.tv_sec = 0;
+        delta.tv_usec = 0;
+    }
+    return delta;
+}
+
+static int libnfc_firmware_mode = 0;
 
 /*-----------------------------------------------------------------------------
 
@@ -263,31 +293,79 @@ PURPOSE:  Reads nNbBytesToRead bytes and writes them in pBuffer.
           Returns the number of bytes really read or -1 in case of error.
 
 -----------------------------------------------------------------------------*/
-
 int phDal4Nfc_uart_read(uint8_t * pBuffer, int nNbBytesToRead)
 {
-   fd_set rfds;
-   struct timeval tv;
-   int ret;
+    int ret;
+    int numRead = 0;
+    struct timeval tv;
+    struct timeval *ptv;
+    struct timespec timeout;
+    fd_set rfds;
 
-   DAL_ASSERT_STR(gComPortContext.nOpened == 1, "read called but not opened!");
+    DAL_ASSERT_STR(gComPortContext.nOpened == 1, "read called but not opened!");
+    DAL_DEBUG("_uart_read() called to read %d bytes", nNbBytesToRead);
 
-   FD_ZERO(&rfds);
-   FD_SET(gComPortContext.nHandle, &rfds);
+    read_property();
 
-   /* select will block for 10 sec */
-   tv.tv_sec = 2;
-   tv.tv_usec = 0;
+    // Read timeout:
+    // FW mode: 10s timeout
+    // 1 byte read: steady-state LLC length read, allowed to block forever
+    // >1 byte read: LLC payload, 100ms timeout (before pn544 re-transmit)
+    if (nNbBytesToRead > 1 && !libnfc_firmware_mode) {
+        clock_gettime(CLOCK_MONOTONIC, &timeout);
+        timeout.tv_nsec += 100000000;
+        if (timeout.tv_nsec > 1000000000) {
+            timeout.tv_sec++;
+            timeout.tv_nsec -= 1000000000;
+        }
+        ptv = &tv;
+    } else if (libnfc_firmware_mode) {
+        clock_gettime(CLOCK_MONOTONIC, &timeout);
+        timeout.tv_sec += 10;
+        ptv = &tv;
+    } else {
+        ptv = NULL;
+    }
 
-   ret = select(gComPortContext.nHandle + 1, &rfds, NULL, NULL, &tv);
+    while (numRead < nNbBytesToRead) {
+       FD_ZERO(&rfds);
+       FD_SET(gComPortContext.nHandle, &rfds);
 
-   if (ret == -1)
-      return -1;
+       if (ptv) {
+          tv = timeval_remaining(timeout);
+          ptv = &tv;
+       }
 
-   if (ret)
-      return read(gComPortContext.nHandle, pBuffer, nNbBytesToRead);
+       ret = select(gComPortContext.nHandle + 1, &rfds, NULL, NULL, ptv);
+       if (ret < 0) {
+           DAL_DEBUG("select() errno=%d", errno);
+           if (errno == EINTR || errno == EAGAIN) {
+               continue;
+           }
+           return -1;
+       } else if (ret == 0) {
+           ALOGW("timeout!");
+           break;  // return partial response
+       }
+       ret = read(gComPortContext.nHandle, pBuffer + numRead, nNbBytesToRead - numRead);
+       if (ret > 0) {
+           ret = apply_errors(pBuffer + numRead, ret);
 
-   return 0;
+           DAL_DEBUG("read %d bytes", ret);
+           numRead += ret;
+       } else if (ret == 0) {
+           DAL_PRINT("_uart_read() EOF");
+           return 0;
+       } else {
+           DAL_DEBUG("_uart_read() errno=%d", errno);
+           if (errno == EINTR || errno == EAGAIN) {
+               continue;
+           }
+           return -1;
+       }
+    }
+
+    return numRead;
 }
 
 /*-----------------------------------------------------------------------------
@@ -301,28 +379,30 @@ PURPOSE:  Writes nNbBytesToWrite bytes from pBuffer to the link
 
 int phDal4Nfc_uart_write(uint8_t * pBuffer, int nNbBytesToWrite)
 {
-   fd_set wfds;
-   struct timeval tv;
-   int ret;
+    int ret;
+    int numWrote = 0;
 
-   DAL_ASSERT_STR(gComPortContext.nOpened == 1, "write called but not opened!");
+    DAL_ASSERT_STR(gComPortContext.nOpened == 1, "write called but not opened!");
+    DAL_DEBUG("_uart_write() called to write %d bytes\n", nNbBytesToWrite);
 
-   FD_ZERO(&wfds);
-   FD_SET(gComPortContext.nHandle, &wfds);
+    while (numWrote < nNbBytesToWrite) {
+        ret = write(gComPortContext.nHandle, pBuffer + numWrote, nNbBytesToWrite - numWrote);
+        if (ret > 0) {
+            DAL_DEBUG("wrote %d bytes", ret);
+            numWrote += ret;
+        } else if (ret == 0) {
+            DAL_PRINT("_uart_write() EOF");
+            return -1;
+        } else {
+            DAL_DEBUG("_uart_write() errno=%d", errno);
+            if (errno == EINTR || errno == EAGAIN) {
+                continue;
+            }
+            return -1;
+        }
+    }
 
-   /* select will block for 10 sec */
-   tv.tv_sec = 2;
-   tv.tv_usec = 0;
-
-   ret = select(gComPortContext.nHandle + 1, NULL, &wfds, NULL, &tv);
-
-   if (ret == -1)
-      return -1;
-
-   if (ret)
-      return write(gComPortContext.nHandle, pBuffer, nNbBytesToWrite);
-
-   return 0;
+    return numWrote;
 }
 
 /*-----------------------------------------------------------------------------
@@ -332,24 +412,43 @@ FUNCTION: phDal4Nfc_uart_reset
 PURPOSE:  Reset the PN544, using the VEN pin
 
 -----------------------------------------------------------------------------*/
-int phDal4Nfc_uart_reset()
+int phDal4Nfc_uart_reset(long level)
 {
-   DAL_PRINT("phDal4Nfc_uart_reset");
+    static const char NFC_POWER_PATH[] = "/sys/devices/platform/nfc-power/nfc_power";
+    int sz;
+    int fd = -1;
+    int ret = NFCSTATUS_FAILED;
+    char buffer[2];
 
-   return NFCSTATUS_FEATURE_NOT_SUPPORTED;
+    DAL_DEBUG("phDal4Nfc_uart_reset, VEN level = %ld", level);
+
+    if (snprintf(buffer, sizeof(buffer), "%u", (unsigned int)level) != 1) {
+        ALOGE("Bad nfc power level (%u)", (unsigned int)level);
+        goto out;
+    }
+
+    fd = open(NFC_POWER_PATH, O_WRONLY);
+    if (fd < 0) {
+        ALOGE("open(%s) for write failed: %s (%d)", NFC_POWER_PATH,
+                strerror(errno), errno);
+        goto out;
+    }
+    sz = write(fd, &buffer, sizeof(buffer) - 1);
+    if (sz < 0) {
+        ALOGE("write(%s) failed: %s (%d)", NFC_POWER_PATH, strerror(errno),
+             errno);
+        goto out;
+    }
+    ret = NFCSTATUS_SUCCESS;
+    if (level == 2) {
+        libnfc_firmware_mode = 1;
+    } else {
+        libnfc_firmware_mode = 0;
+    }
+
+out:
+    if (fd >= 0) {
+        close(fd);
+    }
+    return ret;
 }
-
-/*-----------------------------------------------------------------------------
-
-FUNCTION: phDal4Nfc_uart_write
-
-PURPOSE:  Put the PN544 in download mode, using the GPIO4 pin
-
------------------------------------------------------------------------------*/
-int phDal4Nfc_uart_download()
-{
-   DAL_PRINT("phDal4Nfc_uart_download");
-
-   return NFCSTATUS_FEATURE_NOT_SUPPORTED;
-}
-

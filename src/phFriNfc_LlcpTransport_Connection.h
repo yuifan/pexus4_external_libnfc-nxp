@@ -30,12 +30,13 @@
 
 #include <phFriNfc_Llcp.h>
 
-
 void Handle_ConnectionOriented_IncommingFrame(phFriNfc_LlcpTransport_t      *pLlcpTransport,
                                               phNfc_sData_t                 *psData,
                                               uint8_t                       dsap,
                                               uint8_t                       ptype,
                                               uint8_t                       ssap);
+
+NFCSTATUS phFriNfc_LlcpTransport_ConnectionOriented_HandlePendingOperations(phFriNfc_LlcpTransport_Socket_t *pSocket);
 
 /**
 * \ingroup grp_lib_nfc
@@ -111,7 +112,6 @@ NFCSTATUS phFriNfc_LlcpTransport_ConnectionOriented_Close(phFriNfc_LlcpTransport
 *
 *
 * \param[in]  pLlcpSocket        A pointer to a phFriNfc_LlcpTransport_Socket_t.
-* \param[in]  psServiceName      A pointer to a Service Name 
 * \param[in]  pListen_Cb         The callback to be called each time the
 *                                socket receive a connection request.
 * \param[in]  pContext           Upper layer context to be returned in
@@ -125,7 +125,6 @@ NFCSTATUS phFriNfc_LlcpTransport_ConnectionOriented_Close(phFriNfc_LlcpTransport
 * \retval NFCSTATUS_FAILED                   Operation failed.
 */
 NFCSTATUS phFriNfc_LlcpTransport_ConnectionOriented_Listen(phFriNfc_LlcpTransport_Socket_t*          pLlcpSocket,
-                                                           phNfc_sData_t                             *psServiceName,
                                                            pphFriNfc_LlcpTransportSocketListenCb_t   pListen_Cb,
                                                            void*                                     pContext);
 

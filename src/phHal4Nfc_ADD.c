@@ -468,6 +468,7 @@ void phHal4Nfc_TargetDiscoveryComplete(
                     /*Check for Mifare Supported*/
                     switch( Sak )
                     {
+                      case 0x01: // 1K Classic
                       case 0x09: // Mini
                       case 0x08: // 1K
                       case 0x18: // 4K
@@ -489,17 +490,13 @@ void phHal4Nfc_TargetDiscoveryComplete(
                         psRemoteDevInfo->RemoteDevInfo.Iso14443A_Info.UidLength))
                         {
                             aRemoteDevTypes[Count] = phHal_eMifare_PICC;
-                            
+                            Count++;
                         }
-                        else/*TYPE 3A*/
-                        {
-                            aRemoteDevTypes[Count] = phHal_eISO14443_3A_PICC;
-                        }
-                        Count++;
                     }
-                    else if ( !(Sak & ISO_14443_BITMASK) &&
-                          !(Sak & NFCIP_BITMASK) && (0 == Count))
+                    if ( !(Sak & NFCIP_BITMASK) )
                     {
+                        // Always add a separate 3A target on a separate
+                        // handle, so the upper layers can connect to it.
                         aRemoteDevTypes[Count] = phHal_eISO14443_3A_PICC;
                         Count++;
                     }
@@ -674,11 +671,14 @@ void phHal4Nfc_TargetDiscoveryComplete(
                     if(phHal_eNfcIP1_Target == 
                         Hal4Ctxt->rem_dev_list[Count-1]->RemDevType)
                     {
-                        (void)memcpy(
-                            (void *)Hal4Ctxt->rem_dev_list[0],
-                            (void *)Hal4Ctxt->rem_dev_list[Count-1],
-                                    sizeof(phHal_sRemoteDevInformation_t)
-                                    );      
+                        if (Count != 1)
+                        {
+                            (void)memcpy(
+                                (void *)Hal4Ctxt->rem_dev_list[0],
+                                (void *)Hal4Ctxt->rem_dev_list[Count-1],
+                                        sizeof(phHal_sRemoteDevInformation_t)
+                                        );
+                        }
                         NfcIpDeviceCount = 1;                       
                         break;
                     }

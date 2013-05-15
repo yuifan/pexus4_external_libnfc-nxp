@@ -778,7 +778,8 @@ NFCSTATUS phFriNfc_NdefMap_ChkNdef( phFriNfc_NdefMap_t     *NdefMap)
 #endif  /* PH_FRINFC_MAP_MIFAREUL_DISABLED*/
                 }
                 else if ((0x08 == (sak & 0x18)) ||
-                        (0x18 == (sak & 0x18)))
+                        (0x18 == (sak & 0x18)) ||
+                        (0x01 == sak))
                 {
                     /*  The SAK/Sel_Res says the card is of the type
                     Mifare Standard */
@@ -1171,7 +1172,7 @@ NFCSTATUS phFriNfc_NdefMap_EraseNdef(phFriNfc_NdefMap_t *NdefMap)
 
     static uint8_t     PktData[3] = PH_FRINFC_NDEFMAP_EMPTY_NDEF_MSG;
     uint8_t     MemOffset = PH_FRINFC_NDEFMAP_SEEK_BEGIN;
-    uint32_t    PacketDataLength = sizeof(PktData);
+    static uint32_t    PacketDataLength = sizeof(PktData);
 
     if (NdefMap == NULL )
     {

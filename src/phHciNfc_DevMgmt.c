@@ -71,6 +71,7 @@
 #define NXP_EVT_INFO_EXT_RF_FIELD    0x12U
 #define NXP_EVT_INFO_MEM_VIOLATION   0x13U
 #define NXP_EVT_INFO_TEMP_OVERHEAT   0x14U
+#define NXP_EVT_INFO_LLC_ERROR       0x15U
 
 #define NFC_DEV_TXLDO_MASK           0x03U
 
@@ -118,6 +119,7 @@ typedef enum phHciNfc_DevMgmt_Seq{
     DEV_MGMT_LLC_GRD_TO_L,
     DEV_MGMT_LLC_ACK_TO_H,
     DEV_MGMT_LLC_ACK_TO_L,
+    DEV_MGMT_FELICA_RC,
     DEV_MGMT_EVT_AUTONOMOUS,
     DEV_MGMT_PIPE_CLOSE
 } phHciNfc_DevMgmt_Seq_t;
@@ -517,17 +519,8 @@ phHciNfc_DevMgmt_Initialise(
                                                     pHwRef, p_pipe_info );
                     if(status == NFCSTATUS_SUCCESS)
                     {
-                        
-                        if (HCI_SELF_TEST == psHciContext->init_mode )
-                        {
-                            p_device_mgmt_info->next_seq =
-                                                DEV_MGMT_GPIO_PDIR;
-                        }
-                        else
-                        {
-                            p_device_mgmt_info->next_seq =
-                                                DEV_MGMT_GET_EEPROM_INFO;
-                        }
+                        p_device_mgmt_info->next_seq =
+                                    DEV_MGMT_FELICA_RC;
                         status = NFCSTATUS_PENDING;
                     }
                     break;
@@ -576,6 +569,28 @@ phHciNfc_DevMgmt_Initialise(
                         p_device_mgmt_info->next_seq =
                                                 DEV_MGMT_TX_LDO;
 #endif /* #if  ( NXP_NFC_IFC_TIMEOUT & 0x01 ) */
+                    }
+                    break;
+                }
+                case DEV_MGMT_FELICA_RC:
+                {
+                    config = 0x00;
+                    status = phHciNfc_DevMgmt_Configure( psHciContext, pHwRef,
+                                 NFC_FELICA_RC_ADDR , config );
+                    if(NFCSTATUS_PENDING == status )
+                    {
+
+                        if ((HCI_SELF_TEST == psHciContext->init_mode )
+                            || (HCI_NFC_DEVICE_TEST == psHciContext->init_mode ))
+                        {
+                            p_device_mgmt_info->next_seq =
+                                   DEV_MGMT_GPIO_PDIR;
+                        }
+                        else
+                        {
+                            p_device_mgmt_info->next_seq =
+                                   DEV_MGMT_GET_EEPROM_INFO;
+                        }
                     }
                     break;
                 }
@@ -641,18 +656,27 @@ phHciNfc_DevMgmt_Initialise(
 #endif /* #if  ( NXP_NFC_IFC_TIMEOUT & 0x01 ) */
                 case DEV_MGMT_TX_LDO:
                 {
-                    config = (NFC_DEV_HWCONF_DEFAULT |
-                                    (NXP_DEFAULT_TX_LDO & NFC_DEV_TXLDO_MASK));
-                    status = phHciNfc_DevMgmt_Configure( psHciContext, pHwRef,
-                            NFC_ADDRESS_HW_CONF , config );
-                    if(NFCSTATUS_PENDING == status )
+#if ( NXP_HAL_VERIFY_EEPROM_CRC & 0x01U )
+                    if (0 != p_device_mgmt_info->eeprom_crc)
                     {
-#if ( SW_TYPE_RF_TUNING_BF & 0x01)
-                        p_device_mgmt_info->next_seq = DEV_MGMT_ANAIRQ_CONF;
-#else
-                        p_device_mgmt_info->next_seq = DEV_MGMT_CLK_REQ;
+                        status = NFCSTATUS_FAILED;
+                    }
+                    else
 #endif
-                        /* status = NFCSTATUS_SUCCESS; */
+                    {
+                       config = (NFC_DEV_HWCONF_DEFAULT |
+                                    (NXP_DEFAULT_TX_LDO & NFC_DEV_TXLDO_MASK));
+                       status = phHciNfc_DevMgmt_Configure( psHciContext, pHwRef,
+                            NFC_ADDRESS_HW_CONF , config );
+                       if(NFCSTATUS_PENDING == status )
+                       {
+#if ( SW_TYPE_RF_TUNING_BF & 0x01)
+                           p_device_mgmt_info->next_seq = DEV_MGMT_ANAIRQ_CONF;
+#else
+                           p_device_mgmt_info->next_seq = DEV_MGMT_CLK_REQ;
+#endif
+                           /* status = NFCSTATUS_SUCCESS; */
+                       }
                     }
                     break;
                 }
@@ -1052,17 +1076,20 @@ phHciNfc_DevMgmt_Update_Sequence(
             {
                 p_device_mgmt_info->current_seq = DEV_MGMT_PIPE_OPEN;
                 p_device_mgmt_info->next_seq = DEV_MGMT_PIPE_OPEN ;
-            }break;
+                break;
+            }
             case UPDATE_SEQ:
             {
                 p_device_mgmt_info->current_seq = p_device_mgmt_info->next_seq;
             
-            }break;
+                break;
+            }
             case REL_SEQ:
             {
                 p_device_mgmt_info->current_seq = DEV_MGMT_EVT_AUTONOMOUS;
                 p_device_mgmt_info->next_seq = DEV_MGMT_EVT_AUTONOMOUS ;
-            }break;
+                break;
+            }
             default:
             {
                 break;
@@ -1107,6 +1134,8 @@ phHciNfc_DevMgmt_Test(
     }
     else
     {
+        phHciNfc_DevMgmt_Info_t *p_device_mgmt_info = (phHciNfc_DevMgmt_Info_t *)
+                                        psHciContext->p_device_mgmt_info ;
         p_pipe_info = ((phHciNfc_DevMgmt_Info_t *)
                        psHciContext->p_device_mgmt_info)->p_pipe_info ;
         switch(test_type)
@@ -1124,6 +1153,8 @@ phHciNfc_DevMgmt_Test(
                         p_pipe_info->param_info = test_param->buffer;
                         p_pipe_info->param_length = (uint8_t)test_param->length;
                     }
+                    p_device_mgmt_info->test_result.buffer = NULL;
+                    p_device_mgmt_info->test_result.length = 0;
                     status = 
                         phHciNfc_Send_DevMgmt_Command( psHciContext, pHwRef, 
                             pipe_id, (uint8_t)test_type );
@@ -1213,15 +1244,15 @@ phHciNfc_Recv_DevMgmt_Response(
                 break;
             }
             case NXP_DBG_READ:
-            {
-                *p_device_mgmt_info->p_val = (uint8_t)( length > HCP_HEADER_LEN ) ?
-                                    pResponse[HCP_HEADER_LEN]: 0;
-                p_device_mgmt_info->p_val = NULL;
-
-            }
             /* fall through */
             case NXP_DBG_WRITE:
             {
+                if( NULL != p_device_mgmt_info->p_val )
+                {
+                    *p_device_mgmt_info->p_val = (uint8_t)( length > HCP_HEADER_LEN ) ?
+                                        pResponse[HCP_HEADER_LEN]: 0;
+                    p_device_mgmt_info->p_val = NULL;
+                }
                 break;
             }
             /* Self Test Commands */
@@ -1339,6 +1370,7 @@ phHciNfc_Recv_DevMgmt_Event(
             case NXP_EVT_INFO_MEM_VIOLATION:
             {
                 event_info.eventType = NFC_INFO_MEM_VIOLATION;
+                ALOGW("Your NFC controller is kinda hosed, take it to npelly@ to fix");
                 break;
             }
             case NXP_EVT_INFO_TEMP_OVERHEAT:
@@ -1348,6 +1380,11 @@ phHciNfc_Recv_DevMgmt_Event(
                 event_info.eventType = NFC_INFO_TEMP_OVERHEAT;
                 event_info.eventInfo.overheat_status = 
                                     p_device_mgmt_info->overheat_status;
+                break;
+            }
+            case NXP_EVT_INFO_LLC_ERROR:
+            {
+                event_info.eventType = NFC_INFO_LLC_ERROR;
                 break;
             }
             default:

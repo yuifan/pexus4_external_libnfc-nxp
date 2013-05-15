@@ -6,7 +6,6 @@ LOCAL_PATH:= $(call my-dir)
 
 include $(CLEAR_VARS)
 
-LOCAL_PRELINK_MODULE := false
 LOCAL_ARM_MODE := arm
 
 #phLibNfc
@@ -105,24 +104,28 @@ LOCAL_SRC_FILES += Linux_x86/phDal4Nfc.c
 LOCAL_SRC_FILES += Linux_x86/phDal4Nfc_i2c.c
 LOCAL_SRC_FILES += Linux_x86/phDal4Nfc_messageQueueLib.c
 
-# Really verbose:
-#LOCAL_CFLAGS += -DNXP_MESSAGING -DANDROID -DDEBUG -DDAL_TRACE -DINCLUDE_DALINIT_DEINIT -pipe -fomit-frame-pointer -Wall -Wno-trigraphs -Werror-implicit-function-declaration  -fno-strict-aliasing -mapcs -mno-sched-prolog -mabi=aapcs-linux -mno-thumb-interwork -msoft-float -Uarm -fno-common -fpic
-# Just show I2C traffic:
-#LOCAL_CFLAGS += -DNXP_MESSAGING -DANDROID -DINCLUDE_DALINIT_DEINIT -DLOW_LEVEL_TRACES -pipe -fomit-frame-pointer -Wall -Wno-trigraphs -Werror-implicit-function-declaration  -fno-strict-aliasing -mapcs -mno-sched-prolog -mabi=aapcs-linux -mno-thumb-interwork -msoft-float -Uarm -fno-common -fpic
-# Quiet:
-LOCAL_CFLAGS += -DNXP_MESSAGING -DANDROID -DINCLUDE_DALINIT_DEINIT -pipe -fomit-frame-pointer -Wall -Wno-trigraphs -Werror-implicit-function-declaration  -fno-strict-aliasing -mapcs -mno-sched-prolog -mabi=aapcs-linux -mno-thumb-interwork -msoft-float -Uarm -fno-common -fpic
+LOCAL_CFLAGS += -DNXP_MESSAGING -DANDROID -DNFC_TIMER_CONTEXT -fno-strict-aliasing
 
-ifeq ($(NFC_BUILD_VARIANT),debug)
-LOCAL_CFLAGS += -DDEBUG -D_DEBUG
-LOCAL_CFLAGS += -O0 -g
-$(info DEBUG)
+ifeq ($(TARGET_HAS_NFC_CUSTOM_CONFIG),true)
+LOCAL_CFLAGS += -DNFC_CUSTOM_CONFIG_INCLUDE
+LOCAL_CFLAGS += -I$(TARGET_OUT_HEADERS)/libnfc-nxp
 endif
-ifeq ($(NFC_BUILD_VARIANT),release)
-LOCAL_CFLAGS += -DNDEBUG
-LOCAL_CFLAGS += -Os
-LOCAL_CFLAGS += -Wl,-s
-$(info RELEASE)
-endif
+
+# Uncomment for Chipset command/responses
+# Or use "setprop debug.nfc.LOW_LEVEL_TRACES" at run-time
+# LOCAL_CFLAGS += -DLOW_LEVEL_TRACES
+
+# Uncomment for DAL traces
+# LOCAL_CFLAGS += -DDEBUG -DDAL_TRACE
+
+# Uncomment for LLC traces
+# LOCAL_CFLAGS += -DDEBUG -DLLC_TRACE
+
+# Uncomment for LLCP traces
+# LOCAL_CFLAGS += -DDEBUG -DLLCP_TRACE
+
+# Uncomment for HCI traces
+# LOCAL_CFLAGS += -DDEBUG -DHCI_TRACE
 
 #includes
 LOCAL_CFLAGS += -I$(LOCAL_PATH)/inc
@@ -131,7 +134,7 @@ LOCAL_CFLAGS += -I$(LOCAL_PATH)/src
 
 LOCAL_MODULE:= libnfc
 LOCAL_MODULE_TAGS := optional
-LOCAL_SHARED_LIBRARIES := libcutils libnfc_ndef libdl
+LOCAL_SHARED_LIBRARIES := libcutils libnfc_ndef libdl libhardware
 
 include $(BUILD_SHARED_LIBRARY)
 
@@ -140,8 +143,6 @@ include $(BUILD_SHARED_LIBRARY)
 #
 
 include $(CLEAR_VARS)
-
-LOCAL_PRELINK_MODULE := false
 
 LOCAL_SRC_FILES += src/phFriNfc_NdefRecord.c
 
@@ -153,4 +154,3 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_SHARED_LIBRARIES := libcutils
 
 include $(BUILD_SHARED_LIBRARY)
-

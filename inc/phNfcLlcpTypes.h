@@ -44,6 +44,8 @@
 #define PHFRINFC_LLCP_RW_DEFAULT          1    /**< Default RW value (in frames).*/
 #define PHFRINFC_LLCP_OPTION_DEFAULT      0    /**< Default OPTION value (in frames).*/
 #define PHFRINFC_LLCP_MIUX_DEFAULT        0    /**< Default MIUX value (in bytes) */
+#define PHFRINFC_LLCP_MIUX_MAX            0x7FF    /**< Max MIUX value (in bytes) */
+#define PHFRINFC_LLCP_PDU_HEADER_MAX      3    /**< Max size of PDU header (in bytes) */
 #define PHFRINFC_LLCP_SN_MAX_LENGTH       255  /**< Max length value for the Service Name */
 #define PHFRINFC_LLCP_RW_MAX              15   /**< Max RW value (in frames).*/
 /*@}*/
@@ -55,7 +57,8 @@
  *
  */
  /*@{*/
-#define PHFRINFC_LLCP_NB_SOCKET_MAX          5                                 /**< Max.number of simultaneous sockets */
+#define PHFRINFC_LLCP_NB_SOCKET_MAX          10                                /**< Max.number of simultaneous sockets */
+#define PHFRINFC_LLCP_SNL_RESPONSE_MAX       256                               /**< Max.number of simultaneous discovery requests */
 /*@}*/
 
 /**

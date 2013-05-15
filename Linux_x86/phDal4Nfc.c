@@ -33,6 +33,8 @@
 #include <stdlib.h>
 #ifdef ANDROID
 #include <linux/ipc.h>
+#include <cutils/log.h>
+#include <cutils/properties.h> // for property_get
 #else
 #include <sys/msg.h>
 #endif
@@ -46,11 +48,9 @@
 #include <phDal4Nfc_i2c.h>
 #include <phDal4Nfc_link.h>
 #include <phDal4Nfc_messageQueueLib.h>
+#include <hardware/hardware.h>
+#include <hardware/nfc.h>
 
-/*-----------------------------------------------------------------------------------
-                                  MISC DEFINITIONS
-------------------------------------------------------------------------------------*/
-#define DEFAULT_LINK_TYPE             ENUM_DAL_LINK_TYPE_COM1
 
 /*-----------------------------------------------------------------------------------
                                        TYPES
@@ -98,6 +98,7 @@ static phDal4Nfc_SContext_t           gDalContext;
 static pphDal4Nfc_SContext_t          pgDalContext;
 static phHal_sHwReference_t   *       pgDalHwContext;
 static sem_t                          nfc_read_sem;
+static int                            low_level_traces;
 #ifdef USE_MQ_MESSAGE_QUEUE
 static phDal4Nfc_DeferredCall_Msg_t   nDeferedMessage;
 static mqd_t                          nDeferedCallMessageQueueId;
@@ -116,6 +117,31 @@ static void      phDal4Nfc_FillMsg        (phDal4Nfc_Message_t *pDalMsg, phOsalN
 /*-----------------------------------------------------------------------------------
                                 DAL API IMPLEMENTATION
 ------------------------------------------------------------------------------------*/
+
+static void refresh_low_level_traces() {
+#ifdef LOW_LEVEL_TRACES
+    low_level_traces = 1;
+    return;
+#else
+
+#ifdef ANDROID
+    char value[PROPERTY_VALUE_MAX];
+
+    property_get("ro.debuggable", value, "");
+    if (!value[0] || !atoi(value)) {
+        low_level_traces = 0;  // user build, do not allow debug
+        return;
+    }
+
+    property_get("debug.nfc.LOW_LEVEL_TRACES", value, "0");
+    if (value[0]) {
+        low_level_traces = atoi(value);
+        return;
+    }
+#endif
+    low_level_traces = 0;
+#endif
+}
 
 /*-----------------------------------------------------------------------------
 
@@ -216,6 +242,8 @@ NFCSTATUS phDal4Nfc_Init(void *pContext, void *pHwRef )
 {
     NFCSTATUS        result = NFCSTATUS_SUCCESS;
 
+    refresh_low_level_traces();
+
     if ((NULL != pContext) && (NULL != pHwRef))
     {
         pContext  = pgDalContext;
@@ -239,7 +267,7 @@ NFCSTATUS phDal4Nfc_Init(void *pContext, void *pHwRef )
         else
         {
             static phDal4Nfc_sConfig_t hw_config;
-            hw_config.nLinkType = DEFAULT_LINK_TYPE;
+            hw_config.deviceNode = NULL;
             result = phDal4Nfc_Config(&hw_config, pHwRef );
         }
     }
@@ -282,7 +310,7 @@ NFCSTATUS phDal4Nfc_Shutdown( void *pContext, void *pHwRef)
    return result;
 }
 
-NFCSTATUS phDal4Nfc_ConfigRelease( void *pHwRef)
+NFCSTATUS phDal4Nfc_ConfigRelease(void *pHwRef)
 {
 
    NFCSTATUS result = NFCSTATUS_SUCCESS;
@@ -292,19 +320,23 @@ NFCSTATUS phDal4Nfc_ConfigRelease( void *pHwRef)
 
    if (gDalContext.hw_valid == TRUE)
    {
-      DAL_PRINT("Release Read Semaphore");
-      sem_post(&nfc_read_sem);
+       /* Signal the read and write threads to exit.  NOTE: there
+          actually is no write thread!  :)  */
+       DAL_PRINT("Stop Reader Thread");
+       gReadWriteContext.nReadThreadAlive = 0;
+       gReadWriteContext.nWriteThreadAlive = 0;
 
-       /* Kill the read and write threads */
-      DAL_PRINT("Stop Reader Thread");
-      gReadWriteContext.nReadThreadAlive = 0;
-      gReadWriteContext.nWriteThreadAlive = 0;
+       /* Wake up the read thread so it can exit */
+       DAL_PRINT("Release Read Semaphore");
+       sem_post(&nfc_read_sem);
 
-      if (pthread_join(gReadWriteContext.nReadThread,  &pThreadReturn) != 0)
-      {
-         result = PHNFCSTVAL(CID_NFC_DAL, NFCSTATUS_FAILED);
-         DAL_PRINT("phDal4Nfc_ConfigRelease  KO");
-      }
+       DAL_DEBUG("phDal4Nfc_ConfigRelease - doing pthread_join(%d)",
+                 gReadWriteContext.nReadThread);
+       if (pthread_join(gReadWriteContext.nReadThread,  &pThreadReturn) != 0)
+       {
+           result = PHNFCSTVAL(CID_NFC_DAL, NFCSTATUS_FAILED);
+           DAL_PRINT("phDal4Nfc_ConfigRelease  KO");
+       }
 
       /* Close the message queue */
 #ifdef USE_MQ_MESSAGE_QUEUE
@@ -317,6 +349,9 @@ NFCSTATUS phDal4Nfc_ConfigRelease( void *pHwRef)
       /* Close the link */
       gLinkFunc.close();
 
+      if (gDalContext.pDev != NULL) {
+          nfc_pn544_close(gDalContext.pDev);
+      }
       /* Reset the Read Writer context to NULL */
       memset((void *)&gReadWriteContext,0,sizeof(gReadWriteContext));
       /* Reset the DAL context values to NULL */
@@ -499,22 +534,40 @@ PURPOSE: Configure the serial port.
 NFCSTATUS phDal4Nfc_Config(pphDal4Nfc_sConfig_t config,void **phwref)
 {
    NFCSTATUS                       retstatus = NFCSTATUS_SUCCESS;
+   const hw_module_t* hw_module;
+   nfc_pn544_device_t* pn544_dev;
+   uint8_t num_eeprom_settings;
+   uint8_t* eeprom_settings;
+   int ret;
+
+   /* Retrieve the hw module from the Android NFC HAL */
+   ret = hw_get_module(NFC_HARDWARE_MODULE_ID, &hw_module);
+   if (ret) {
+       ALOGE("hw_get_module() failed");
+       return NFCSTATUS_FAILED;
+   }
+   ret = nfc_pn544_open(hw_module, &pn544_dev);
+   if (ret) {
+       ALOGE("Could not open pn544 hw_module");
+       return NFCSTATUS_FAILED;
+   }
+   config->deviceNode = pn544_dev->device_node;
+   if (config->deviceNode == NULL) {
+       ALOGE("deviceNode NULL");
+       return NFCSTATUS_FAILED;
+   }
 
    DAL_PRINT("phDal4Nfc_Config");
 
-   if ((config == NULL) || (phwref == NULL) || (config->nClientId == -1))
+   if ((config == NULL) || (phwref == NULL))
       return NFCSTATUS_INVALID_PARAMETER;
 
    /* Register the link callbacks */
    memset(&gLinkFunc, 0, sizeof(phDal4Nfc_link_cbk_interface_t));
-   switch(config->nLinkType)
+   switch(pn544_dev->linktype)
    {
-      case ENUM_DAL_LINK_TYPE_COM1:
-      case ENUM_DAL_LINK_TYPE_COM2:
-      case ENUM_DAL_LINK_TYPE_COM3:
-      case ENUM_DAL_LINK_TYPE_COM4:
-      case ENUM_DAL_LINK_TYPE_COM5:
-      case ENUM_DAL_LINK_TYPE_USB:
+      case PN544_LINK_TYPE_UART:
+      case PN544_LINK_TYPE_USB:
       {
 	 DAL_PRINT("UART link Config");
          /* Uart link interface */
@@ -526,12 +579,11 @@ NFCSTATUS phDal4Nfc_Config(pphDal4Nfc_sConfig_t config,void **phwref)
          gLinkFunc.open_and_configure = phDal4Nfc_uart_open_and_configure;
          gLinkFunc.read               = phDal4Nfc_uart_read;
          gLinkFunc.write              = phDal4Nfc_uart_write;
-         gLinkFunc.download           = phDal4Nfc_uart_download;
          gLinkFunc.reset              = phDal4Nfc_uart_reset;
       }
       break;
 
-      case ENUM_DAL_LINK_TYPE_I2C:
+      case PN544_LINK_TYPE_I2C:
       {
 	 DAL_PRINT("I2C link Config");
          /* i2c link interface */
@@ -575,6 +627,9 @@ NFCSTATUS phDal4Nfc_Config(pphDal4Nfc_sConfig_t config,void **phwref)
 #else
    nDeferedCallMessageQueueId = config->nClientId;
 #endif
+
+   gDalContext.pDev = pn544_dev;
+
    /* Start Read and Write Threads */
    if(NFCSTATUS_SUCCESS != phDal4Nfc_StartThreads())
    {
@@ -582,7 +637,7 @@ NFCSTATUS phDal4Nfc_Config(pphDal4Nfc_sConfig_t config,void **phwref)
    }
 
    gDalContext.hw_valid = TRUE;
-
+   phDal4Nfc_Reset(1);
    phDal4Nfc_Reset(0);
    phDal4Nfc_Reset(1);
 
@@ -600,7 +655,7 @@ NFCSTATUS phDal4Nfc_Reset(long level)
 {
    NFCSTATUS	retstatus = NFCSTATUS_SUCCESS;
 
-   DAL_DEBUG("phDal4Nfc_Reset: VEN to %d",level);
+   DAL_DEBUG("phDal4Nfc_Reset: VEN to %ld",level);
 
    retstatus = gLinkFunc.reset(level);
 
@@ -662,6 +717,22 @@ int phDal4Nfc_ReaderThread(void * pArg)
     phOsalNfc_Message_t      OsalMsg ;
     int i;
     int i2c_error_count;
+    int i2c_workaround;
+    int i2c_device_address = 0x57;
+    if (gDalContext.pDev != NULL) {
+        i2c_workaround = gDalContext.pDev->enable_i2c_workaround;
+        if (gDalContext.pDev->i2c_device_address) {
+            i2c_device_address = gDalContext.pDev->i2c_device_address;
+            if (i2c_workaround && i2c_device_address < 32)
+            {
+                ALOGE("i2c_device_address not set to valid value");
+                return NFCSTATUS_FAILED;
+            }
+        }
+    } else {
+        ALOGE("gDalContext.pDev is not set");
+        return NFCSTATUS_FAILED;
+    }
 
     pthread_setname_np(pthread_self(), "reader");
 
@@ -677,47 +748,60 @@ int phDal4Nfc_ReaderThread(void * pArg)
 	DAL_PRINT("RX Thread Sem Lock\n");
         sem_wait(&nfc_read_sem);
         DAL_PRINT("RX Thread Sem UnLock\n");
+
+        if (!gReadWriteContext.nReadThreadAlive)
+        {
+            /* got the signal that we should exit.  NOTE: we don't
+               attempt to read below, since the read may block */
+            break;
+        }
+
         /* Issue read operation.*/
 
     i2c_error_count = 0;
 retry:
 	gReadWriteContext.nNbOfBytesRead=0;
-	DAL_DEBUG("\n*New *** *****Request Length = %d",gReadWriteContext.nNbOfBytesToRead);
+	DAL_DEBUG("RX Thread *New *** *****Request Length = %d",gReadWriteContext.nNbOfBytesToRead);
 	memsetRet=memset(gReadWriteContext.pReadBuffer,0,gReadWriteContext.nNbOfBytesToRead);
 
 	/* Wait for IRQ !!!  */
     gReadWriteContext.nNbOfBytesRead = gLinkFunc.read(gReadWriteContext.pReadBuffer, gReadWriteContext.nNbOfBytesToRead);
 
-    /* TODO: Remove this hack
-     * Reading the value 0x57 indicates a HW I2C error at I2C address 0x57
+    /* A read value equal to the i2c_device_address indicates a HW I2C error at I2C address i2c_device_address
      * (pn544). There should not be false positives because a read of length 1
-     * must be a HCI length read, and a length of 0x57 is impossible (max is 33).
+     * must be a HCI length read, and a length of i2c_device_address is impossible (max is 33).
      */
-    if(gReadWriteContext.nNbOfBytesToRead == 1 && gReadWriteContext.pReadBuffer[0] == 0x57)
+    if (i2c_workaround && gReadWriteContext.nNbOfBytesToRead == 1 &&
+            gReadWriteContext.pReadBuffer[0] == i2c_device_address)
     {
         i2c_error_count++;
-        DAL_DEBUG("Read 0x57 %d times\n", i2c_error_count);
+        DAL_DEBUG("RX Thread Read 0x%02x  ", i2c_device_address);
+        DAL_DEBUG("%d times\n", i2c_error_count);
+
         if (i2c_error_count < 5) {
             usleep(2000);
             goto retry;
         }
-        DAL_PRINT("NOTHING TO READ, RECOVER");
+        DAL_PRINT("RX Thread NOTHING TO READ, RECOVER");
         phOsalNfc_RaiseException(phOsalNfc_e_UnrecovFirmwareErr,1);
     }
     else
     {
         i2c_error_count = 0;
-#ifdef LOW_LEVEL_TRACES
-        phOsalNfc_PrintData("Received buffer", (uint16_t)gReadWriteContext.nNbOfBytesRead, gReadWriteContext.pReadBuffer);
-#endif
-        DAL_DEBUG("Read ok. nbToRead=%d\n", gReadWriteContext.nNbOfBytesToRead);
-        DAL_DEBUG("NbReallyRead=%d\n", gReadWriteContext.nNbOfBytesRead);
-        DAL_PRINT("ReadBuff[]={ ");
+
+        if (low_level_traces)
+        {
+             phOsalNfc_PrintData("RECV", (uint16_t)gReadWriteContext.nNbOfBytesRead,
+                    gReadWriteContext.pReadBuffer, low_level_traces);
+        }
+        DAL_DEBUG("RX Thread Read ok. nbToRead=%d\n", gReadWriteContext.nNbOfBytesToRead);
+        DAL_DEBUG("RX Thread NbReallyRead=%d\n", gReadWriteContext.nNbOfBytesRead);
+/*      DAL_PRINT("RX Thread ReadBuff[]={ ");
         for (i = 0; i < gReadWriteContext.nNbOfBytesRead; i++)
         {
-          DAL_DEBUG("0x%x ", gReadWriteContext.pReadBuffer[i]);
+          DAL_DEBUG("RX Thread 0x%x ", gReadWriteContext.pReadBuffer[i]);
         }
-        DAL_PRINT("}\n");
+        DAL_PRINT("RX Thread }\n"); */
 
         /* read completed immediately */
         sMsg.eMsgType= PHDAL4NFC_READ_MESSAGE;
@@ -729,6 +813,9 @@ retry:
     }
 
     } /* End of thread Loop*/
+
+    DAL_PRINT("RX Thread  exiting");
+
     return TRUE;
 }
 
@@ -835,7 +922,11 @@ void phDal4Nfc_DeferredCb (void  *params)
             DAL_PRINT(" Dal deferred read called \n");
             TransactionInfo.buffer=gReadWriteContext.pReadBuffer;
             TransactionInfo.length=(uint16_t)gReadWriteContext.nNbOfBytesRead;
-            TransactionInfo.status=NFCSTATUS_SUCCESS;
+            if (gReadWriteContext.nNbOfBytesRead == gReadWriteContext.nNbOfBytesToRead) {
+                TransactionInfo.status=NFCSTATUS_SUCCESS;
+            } else {
+                TransactionInfo.status=NFCSTATUS_READ_FAILED;
+            }
             gReadWriteContext.nReadBusy = FALSE;
 
 
@@ -851,9 +942,11 @@ void phDal4Nfc_DeferredCb (void  *params)
         case PHDAL4NFC_WRITE_MESSAGE:
             DAL_PRINT(" Dal deferred write called \n");
 
-#ifdef LOW_LEVEL_TRACES
-            phOsalNfc_PrintData("Send buffer", (uint16_t)gReadWriteContext.nNbOfBytesToWrite, gReadWriteContext.pWriteBuffer);
-#endif
+            if(low_level_traces)
+            {
+                phOsalNfc_PrintData("SEND", (uint16_t)gReadWriteContext.nNbOfBytesToWrite,
+                        gReadWriteContext.pWriteBuffer, low_level_traces);
+            }
 
             /* DAL_DEBUG("dalMsg->transactInfo.length : %d\n", dalMsg->transactInfo.length); */
             /* Make a Physical WRITE */
@@ -878,12 +971,12 @@ void phDal4Nfc_DeferredCb (void  *params)
                 DAL_PRINT(" Physical Write Success \n"); 
 	        TransactionInfo.length=(uint16_t)gReadWriteContext.nNbOfBytesWritten;
 	        TransactionInfo.status=NFCSTATUS_SUCCESS;
-                DAL_PRINT("WriteBuff[]={ ");
+/*              DAL_PRINT("WriteBuff[]={ ");
                 for (i = 0; i < gReadWriteContext.nNbOfBytesWritten; i++)
                 {
                   DAL_DEBUG("0x%x ", gReadWriteContext.pWriteBuffer[i]);
                 }
-                DAL_PRINT("}\n");
+                DAL_PRINT("}\n"); */
 
 		// Free TempWriteBuffer 
 		if(gReadWriteContext.pTempWriteBuffer != NULL)
@@ -952,4 +1045,3 @@ void phDal4Nfc_DeferredCall(pphDal4Nfc_DeferFuncPointer_t func, void *param)
 }
 
 #undef _DAL_4_NFC_C
-

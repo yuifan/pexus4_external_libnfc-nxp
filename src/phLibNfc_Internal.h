@@ -134,6 +134,10 @@ typedef struct phLibNfc_Hal_CB_Info
     pphLibNfc_LlcpLinkStatusCb_t   pClientLlcpLinkCb;
     void                           *pClientLlcpLinkCntx;
 
+    /*LLCP service discovery*/
+    pphLibNfc_RspCb_t              pClientLlcpDiscoveryCb;
+    void                           *pClientLlcpDiscoveryCntx;
+
 }phLibNfc_Hal_CB_Info_t;
 
 typedef struct phLibNfc_NdefInfo
@@ -192,10 +196,10 @@ typedef struct phLibNfc_LlcpInfo
    phFriNfc_Llcp_t sLlcpContext;
 
    /* LLC Rx buffer */
-   uint8_t pRxBuffer[1024];
+   uint8_t pRxBuffer[PHFRINFC_LLCP_PDU_HEADER_MAX + PHFRINFC_LLCP_MIU_DEFAULT + PHFRINFC_LLCP_MIUX_MAX];
 
    /* LLC Tx buffer */
-   uint8_t pTxBuffer[1024];
+   uint8_t pTxBuffer[PHFRINFC_LLCP_PDU_HEADER_MAX + PHFRINFC_LLCP_MIU_DEFAULT + PHFRINFC_LLCP_MIUX_MAX];
 
 } phLibNfc_LlcpInfo_t;
 
@@ -220,6 +224,9 @@ typedef struct phLibNfc_LibContext
     phLibNfc_sADD_Cfg_t          sADDconfig;
     uint32_t                     Connected_handle,
                                  Discov_handle[MAX_REMOTE_DEVICES];
+
+    /* To store the previous connected handle in case of Multiple protocol tags */
+    uint32_t Prev_Connected_handle;
 
     /*Call back function pointers */
 
